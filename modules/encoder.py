@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from causal_conv import CausalConv1d
+from modules.casual_conv_blocks import CausalConv1d
 from collections import OrderedDict
 
 class Encoder(nn.Module):

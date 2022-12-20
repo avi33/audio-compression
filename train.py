@@ -92,17 +92,7 @@ def train():
         ema = EMA(net, decay_per_epoch=args.ema)
         epochs_from_last_reset = 0
         decay_per_epoch_orig = args.ema
-
-    '''loss'''
-    if args.loss_type == "ce":
-        criterion = nn.CrossEntropyLoss(reduction="sum").to(device)
-    elif args.loss_type == 'label_smooth':
-        from losses.label_smoothing_ce import LabelSmoothCrossEntropyLoss
-        criterion = LabelSmoothCrossEntropyLoss(reduction="sum", smoothing=0.1).to(device)
-    else:
-        raise ValueError("wrong loss, received {}".format(args.loss_type))
-    
-    loss_ce = nn.CrossEntropyLoss(reduction="sum").to(device)
+        
 
     torch.backends.cudnn.benchmark = True
     acc_test = 0
@@ -130,13 +120,14 @@ def train():
             # set 'decay_per_step' for the eooch
             ema.set_decay_per_step(len(train_loader))        
         
-        for iterno, (x, y) in  enumerate(metric_logger.log_every(train_loader, args.log_interval, header)):        
+        for iterno, (x, _) in  enumerate(metric_logger.log_every(train_loader, args.log_interval, header)):        
             net.zero_grad(set_to_none=True)
             x = x.to(device)            
-            y = y.to(device)
             with torch.cuda.amp.autocast(enabled=scaler is not None):                
-                y_est = net(x)
-                loss = criterion(y_est, y)
+                x_est = net(x)
+                loss_rec = F.mse_loss(x_est, x, reduction="mean")
+                
+
             if args.amp:
                 scaler.scale(criterion).backward()
                 scaler.unscale_(opt)
