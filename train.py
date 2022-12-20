@@ -163,10 +163,11 @@ def train():
                 loss_D.backward()
                 optD.step()
                                                               
-                netG.zero_grad()#(set_to_none=True)
-                # x_est = netG(x)
+                netG.zero_grad(set_to_none=True)                                
 
                 '''generator'''
+                logits_D_fake, features_D_fake = netD(x_est)
+
                 loss_rec_time = F.mse_loss(x_est, x, reduction="mean")
                 loss_rec_mel = criterion_rec_mel(x_est, x)
                 loss_fm = 0
@@ -177,7 +178,7 @@ def train():
                     for j in range(len(features_D_fake[0])):
                         loss_fm += F.l1_loss(features_D_fake[i][j], features_D_real[i][j].detach(), reduction="mean") / features_D_real[i][j].detach().abs().mean()
                 
-                loss_G = loss_rec_time# + loss_fm + loss_adv
+                loss_G = loss_rec_time + loss_fm + loss_adv + loss_rec_mel
 
             if args.amp:
                 scaler.scale(loss_G).backward()
