@@ -11,6 +11,8 @@ from pathlib import Path
 from utils.helper_funcs import add_weight_decay
 import utils.logger as logger
 import copy
+from utils import save_sample
+
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -19,6 +21,8 @@ def parse_args():
     parser.add_argument("--batch_size", default=4, type=int)
     parser.add_argument("--dataset", default="cmuarctic", type=str)
     parser.add_argument("--n_epochs", default=100, type=int)
+    parser.add_argument("--sampling_rate", default=8000, type=int)
+    parser.add_argument("--seq_len", default=4000, type=int)
     '''net'''
     parser.add_argument("--net_type", default="cnn", type=str)
     '''optimizer'''
@@ -43,8 +47,8 @@ def parse_args():
 def create_dataset(args):
     if args.dataset == 'cmuarctic':
         from data.cmudata import CMUDataset as Dataset        
-        train_set = Dataset(root=r"/media/avi/8E56B6E056B6C86B/datasets/ARCTIC", mode='train', segment_length=8000, sampling_rate=16000, augment=None)
-        test_set = Dataset(root=r"/media/avi/8E56B6E056B6C86B/datasets/ARCTIC", mode='test', segment_length=8000, sampling_rate=16000, augment=None)
+        train_set = Dataset(root=r"/media/avi/8E56B6E056B6C86B/datasets/ARCTIC8k", mode='train', segment_length=args.seq_len, sampling_rate=args.sampling_rate, augment=None)
+        test_set = Dataset(root=r"/media/avi/8E56B6E056B6C86B/datasets/ARCTIC8k", mode='test', segment_length=args.seq_len, sampling_rate=args.sampling_rate, augment=None)
 
     return train_set, test_set
 
@@ -66,9 +70,12 @@ def train():
     train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, drop_last=True, num_workers=4, pin_memory=True)
     test_loader = DataLoader(test_set, batch_size=args.batch_size, shuffle=False, drop_last=False, num_workers=4, pin_memory=True)
     '''net'''
-    from modules.compressnet import create_net
-    net = create_net(args)
-    net.to(device)
+    from modules.soundsrteam import SoundStream
+    netG = SoundStream(C=32, D=32, n_q=8, codebook_size=10)
+    netG.to(device)
+
+    from modules.msstftd import MultiScaleSTFTDiscriminator
+    netD = MultiScaleSTFTDiscriminator(filters=32)
     '''optimizer'''
     if args.amp:
         from torch.cuda.amp import GradScaler
@@ -78,18 +85,19 @@ def train():
         scaler = None
         eps = 1e-8
     
-    parameters = add_weight_decay(net, weight_decay=args.wd, skip_list=())
+    parametersG = add_weight_decay(netG, weight_decay=args.wd, skip_list=())
+    optG = optim.AdamW(parametersG, lr=args.max_lr, betas=(0.9, 0.99), eps=eps, weight_decay=0)
 
-    opt = optim.AdamW(parameters, lr=args.max_lr, betas=(0.9, 0.99), eps=eps, weight_decay=0)
-    lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(opt,
-                                                       max_lr=args.max_lr,
-                                                       steps_per_epoch=len(train_loader),
-                                                       epochs=args.n_epochs,
-                                                       pct_start=0.1,                                                       
-                                                    )        
+    optD = optim.AdamW(netD.parameters(), lr=args.max_lr, betas=(0.9, 0.99), eps=eps, weight_decay=0)
+    # lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(opt,
+    #                                                    max_lr=args.max_lr,
+    #                                                    steps_per_epoch=len(train_loader),
+    #                                                    epochs=args.n_epochs,
+    #                                                    pct_start=0.1,                                                       
+    #                                                 )        
     if args.ema is not None:
         from modules.ema import ModelEma as EMA
-        ema = EMA(net, decay_per_epoch=args.ema)
+        ema = EMA(netG, decay_per_epoch=args.ema)
         epochs_from_last_reset = 0
         decay_per_epoch_orig = args.ema
         
@@ -99,12 +107,23 @@ def train():
     steps = 0        
     skip_scheduler = False
 
+    ##########################
+    # Dumping original audio #
+    ##########################    
+    test_audio = []
+    for i, (x_t, _) in enumerate(test_loader):
+        save_sample(root / ("original_%d.wav" % i), args.sampling_rate, x_t)
+        writer.add_audio("original/sample_%d.wav" % i, x_t, 0, sample_rate=args.sampling_rate)
+        test_audio.append(test_audio)
+        if i > 10:
+            break
+
     if load_root and load_root.exists():
         checkpoint = torch.load(load_root / "chkpnt.pt")
-        net.load_state_dict(checkpoint['model_dict'])
-        opt.load_state_dict(checkpoint['opt_dict'])
-        steps = checkpoint['resume_step'] if 'resume_step' in checkpoint.keys() else 0
-        best_acc = checkpoint['best_acc']
+        netG.load_state_dict(checkpoint['G_model_dict'])
+        optG.load_state_dict(checkpoint['G_opt_dict'])
+        netD.load_state_dict(checkpoint['D_model_dict'])
+        optD.load_state_dict(checkpoint['D_opt_dict'])        
         print('checkpoints loaded')
 
     for epoch in range(1, args.n_epochs + 1):
@@ -120,37 +139,64 @@ def train():
             # set 'decay_per_step' for the eooch
             ema.set_decay_per_step(len(train_loader))        
         
-        for iterno, (x, _) in  enumerate(metric_logger.log_every(train_loader, args.log_interval, header)):        
-            net.zero_grad(set_to_none=True)
+        for iterno, (x, _) in  enumerate(metric_logger.log_every(train_loader, args.log_interval, header)):                    
             x = x.to(device)            
-            with torch.cuda.amp.autocast(enabled=scaler is not None):                
-                x_est = net(x)
-                loss_rec = F.mse_loss(x_est, x, reduction="mean")
+            with torch.cuda.amp.autocast(enabled=scaler is not None):                                                
+                x_est = netG(x)
+                #######################
+                # Train Discriminator #
+                #######################
+                D_fake_det = netD(x_est.detach())
+                D_real = netD(x)
+
+                loss_D = 0
+                for scale in D_fake_det:
+                    loss_D += F.relu(1 + scale[-1]).mean()
+
+                for scale in D_real:
+                    loss_D += F.relu(1 - scale[-1]).mean()
+
+                netD.zero_grad(set_to_none=True)
+                loss_D.backward()
+                optD.step()
+                              
                 
+                
+                netG.zero_grad(set_to_none=True)
+                x_est = netG(x)
+                '''generator'''
+                loss_rec_time = F.mse_loss(x_est, x, reduction="mean")
+                loss_rec_mel = None
+                loss_fm = None
+                lossG = loss_rec_time + loss_rec_mel + loss_fm
 
             if args.amp:
-                scaler.scale(criterion).backward()
-                scaler.unscale_(opt)
-                torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1)
-                scaler.step(opt)
+                scaler.scale(lossG).backward()
+                scaler.unscale_(optG)
+                torch.nn.utils.clip_grad_norm_(netG.parameters(), max_norm=1)
+                scaler.step(optG)
                 amp_scale = scaler.get_scale()
                 scaler.update()
                 skip_scheduler = amp_scale != scaler.get_scale()
             else:
-                loss.backward()
-                opt.step()
+                lossG.backward()
+                optG.step()
 
             if args.ema is not None:
-                ema.update(net, steps)
+                ema.update(netG, steps)
 
-            if not skip_scheduler:
-                lr_scheduler.step()
+            # if not skip_scheduler:
+            #     lr_scheduler.step()
+            
+            
+            
             
             '''metrics'''            
-            acc = logger.accuracy(y_est, target=y, topk=(1,))[0]            
-            metric_logger.update(loss=loss.item())
-            metric_logger.update(acc=acc)
-            metric_logger.update(lr=opt.param_groups[0]["lr"])                                
+            metric_logger.update(lossG=lossG.item())
+            metric_logger.update(loss_rec_time=loss_rec_time)
+            metric_logger.update(loss_rec_mel=loss_rec_mel)
+            metric_logger.update(lr=optG.param_groups[0]["lr"])
+
 
             ######################
             # Update tensorboard #

@@ -4,6 +4,8 @@ import torch.nn.functional as F
 import numpy as np
 import torch.distributed as dist
 import copy
+from scipy.io.wavfile import write
+
 epsilon = 1e-8
 
 
@@ -216,3 +218,18 @@ def parse_gpu_ids(gpu_ids): #list of ints
     s = ''.join(str(x) + ',' for x in gpu_ids)
     s = s.rstrip().rstrip(',')
     return s
+
+def save_sample(file_path, sampling_rate, audio):
+    """Helper function to save sample
+    Args:
+        file_path (str or pathlib.Path): save file path
+        sampling_rate (int): sampling rate of audio (usually 22050)
+        audio (torch.FloatTensor): torch array containing audio in [-1, 1]
+    """
+    audio = (audio.numpy() * 32767).astype("int16")
+    write(file_path, sampling_rate, audio)
+
+
+def rms(x):
+    r = np.sqrt((x**2).mean())
+    return 
