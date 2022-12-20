@@ -1,20 +1,30 @@
 import torch
 import torch.nn as nn
-from stft import MelSpectogram
+from torch.nn.modules.loss import _Loss
+import torch.nn.functional as F
+from modules.stft import Audio2Mel
+import numpy as np
 
-class SpectralReconstructionLoss(nn.Module):
-    def __init__(self, device, weight=None, reduction='mean'):
-        super().__init__(weight=weight, reduction=reduction)
-    
-    def forward(self x, G_x):
-        L = 0
+class SpectralReconstructionLoss(_Loss):
+    def __init__(self, sr, eps=1e-5, reduction='mean', device=None):
+        super().__init__(reduction=reduction)
+        self.sr = sr
+        self.eps = eps
+        self.melspec = []
         for i in range(6,12):
+            s = 2**i            
+            self.melspec.append(Audio2Mel(n_fft=s, win_length=s, hop_length=s//4, n_mel_channels=64, sampling_rate=sr).to(device))
+        
+
+    def forward(self, G_x, x):
+        L = 0
+        rng = np.arange(6, 12, 1)
+        for idx, i in enumerate(rng):
             s = 2**i
             alpha_s = (s/2)**0.5
-            melspec = MelSpectrogram(sample_rate=sr, n_fft=s, hop_length=s//4, n_mels=8, wkwargs={"device": device}).to(device)
-            S_x = melspec(x)
-            S_G_x = melspec(G_x)
-            
-            loss = (S_x-S_G_x).abs().sum() + alpha_s*(((torch.log(S_x.abs()+eps)-torch.log(S_G_x.abs()+eps))**2).sum(dim=-2)**0.5).sum()
-            L += loss
+            S_x = self.melspec[idx](x)
+            S_G_x = self.melspec[idx](G_x)
+            l1 = F.l1_loss(S_G_x, S_x, reduction=self.reduction)
+            l2 = F.mse_loss(S_G_x, S_x, reduction=self.reduction)
+            L += l1 + alpha_s*l2            
         return L

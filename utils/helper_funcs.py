@@ -233,3 +233,8 @@ def save_sample(file_path, sampling_rate, audio):
 def rms(x):
     r = np.sqrt((x**2).mean())
     return 
+
+def flatten_list(nested_list):
+    import itertools
+    flat_list = list(itertools.chain(*nested_list))
+    return flat_list
