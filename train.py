@@ -225,18 +225,31 @@ def train():
                 with torch.no_grad():                                        
                     for i, (x, _) in enumerate(test_loader):                        
                         x = x.to(device)                        
-                        y_est = netG(x)
-                        loss_rec_time_test += F.mse_loss(x_est, x, reduction="mean")
-                        loss_rec_mel_test += criterion_rec_mel(x_est, x)
+                        x_est = netG(x)
+                        loss_rec_time_test += F.mse_loss(x_est, x, reduction="mean").item()
+                        loss_rec_mel_test += criterion_rec_mel(x_est, x).item()
                                 
                 loss_rec_time_test /= len(test_loader)
                 loss_rec_mel_test /= len(test_loader)
 
-                writer.add_scalar("test/loss_rec_time", loss_rec_time_test.item(), steps)
-                writer.add_scalar("test/loss_rec_mel", loss_rec_mel_test.item(), steps)                
+                for ii, (x, _) in enumerate(test_set):
+                    with torch.no_grad():
+                        x_est = netG(x)
+                    save_sample(root / ("generated_%d.wav" % ii), args.sampling_rate, x_est)                    
+                    writer.add_audio(
+                            "generated/sample_%d.wav" % ii,
+                            x_est,
+                            epoch,
+                            sample_rate=args.sampling_rate,
+                        )
+                    if ii > 10:
+                        break
 
-                metric_logger.update(loss_rec_time=loss_rec_time.item())
-                metric_logger.update(loss_rec_mel=loss_rec_mel.item())
+                writer.add_scalar("test/loss_rec_time", loss_rec_time_test, steps)
+                writer.add_scalar("test/loss_rec_mel", loss_rec_mel_test, steps)                
+
+                metric_logger.update(loss_rec_time=loss_rec_time)
+                metric_logger.update(loss_rec_mel=loss_rec_mel)
                 
                 netG.train()                
                                 
