@@ -224,7 +224,7 @@ def train():
                 netG.eval()                
                 with torch.no_grad():                                        
                     for i, (x, _) in enumerate(test_loader):                        
-                        x = x.to(device)                        
+                        x = x.to(device)
                         x_est = netG(x)
                         loss_rec_time_test += F.mse_loss(x_est, x, reduction="mean").item()
                         loss_rec_mel_test += criterion_rec_mel(x_est, x).item()
@@ -234,8 +234,9 @@ def train():
 
                 for ii, (x, _) in enumerate(test_set):
                     with torch.no_grad():
-                        x_est = netG(x)
-                    save_sample(root / ("generated_%d.wav" % ii), args.sampling_rate, x_est)                    
+                        x = x.to(device)           
+                        x_est = netG(x.unsqueeze(0))                        
+                    save_sample(root / ("generated_%d.wav" % ii), args.sampling_rate, x_est if x_est.device == torch.device("cpu") else x_est.cpu())
                     writer.add_audio(
                             "generated/sample_%d.wav" % ii,
                             x_est,
