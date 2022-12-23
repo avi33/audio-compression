@@ -1,5 +1,22 @@
 import torch
+import torch.nn as nn
 import matplotlib.pyplot as plt
+
+class YullieWalker(nn.Module):
+    def __init__(self, p=None) -> None:
+        super().__init__()
+        self.p = p
+        self.step = 1                
+    
+    def build_system_of_equantions(self, x):
+        y = x[win_len::self.step]
+        X = x[:-self.p].unfold(dimension=0, size=self.p, step=self.step)
+        return X, y
+    
+    def forward(self, x):
+        X, y = self.build_system_of_equantions(x)
+        return X, y
+        
 
 def build_system_of_equantions(x, win_len, step=1):
     y = x[win_len::step]

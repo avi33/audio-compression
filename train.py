@@ -11,7 +11,7 @@ from pathlib import Path
 from utils.helper_funcs import add_weight_decay
 import utils.logger as logger
 import copy
-from utils.helper_funcs import save_sample, flatten_list
+from utils.helper_funcs import save_sample, save_audio
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -22,7 +22,7 @@ def parse_args():
     parser.add_argument("--dataset", default="cmuarctic", type=str)
     parser.add_argument("--n_epochs", default=100, type=int)
     parser.add_argument("--sampling_rate", default=8000, type=int)
-    parser.add_argument("--seq_len", default=4000, type=int)
+    parser.add_argument("--seq_len", default=8000, type=int)
     '''net'''
     parser.add_argument("--net_type", default="cnn", type=str)
     '''optimizer'''
@@ -115,6 +115,7 @@ def train():
     test_audio = []
     for i, (x_t, _) in enumerate(test_set):
         save_sample(root / ("original_%d.wav" % i), args.sampling_rate, x_t)
+        save_audio(x_t, root / ("original_%d.wav" % i), args.sampling_rate)
         writer.add_audio("original/sample_%d.wav" % i, x_t, 0, sample_rate=args.sampling_rate)
         test_audio.append(test_audio)
         if i > 10:
@@ -142,126 +143,127 @@ def train():
             ema.set_decay_per_step(len(train_loader))        
         
         for iterno, (x, _) in  enumerate(metric_logger.log_every(train_loader, args.log_interval, header)):                    
-            x = x.to(device)            
-            with torch.cuda.amp.autocast(enabled=scaler is not None):                                                
-                x_est = netG(x)
-                #######################
-                # Train Discriminator #
-                #######################
-                netD.zero_grad(set_to_none=True)
+            x = x.to(device)
+            with torch.autograd.detect_anomaly():         
+                with torch.cuda.amp.autocast(enabled=scaler is not None):                                                
+                    x_est = netG(x)                
+                    #######################
+                    # Train Discriminator #
+                    #######################
+                    netD.zero_grad(set_to_none=True)
+                    
+                    logits_D_fake, features_D_fake = netD(x_est.detach())
+                    logits_D_real, features_D_real = netD(x)
+                    
+                    loss_D = 0
+                    for i, scale in enumerate(logits_D_fake):                    
+                        loss_D += F.relu(1 + scale).mean()
+
+                    for i, scale in enumerate(logits_D_real):                    
+                        loss_D += F.relu(1 - scale).mean()
+                    
+                    loss_D.backward()
+                    optD.step()
+                                                                
+                    netG.zero_grad(set_to_none=True)                                
+
+                    '''generator'''
+                    logits_D_fake, features_D_fake = netD(x_est)
+
+                    loss_rec_time = F.mse_loss(x_est, x, reduction="mean")
+                    loss_rec_mel = criterion_rec_mel(x_est, x)
+                    loss_fm = 0
+                    loss_adv = 0
+                    for i, scale in enumerate(logits_D_fake):
+                        loss_adv += -scale.mean()
+                    for i in range(len(features_D_fake)):
+                        for j in range(len(features_D_fake[0])):
+                            loss_fm += F.l1_loss(features_D_fake[i][j], features_D_real[i][j].detach(), reduction="mean") / features_D_real[i][j].detach().abs().mean()
+                    
+                    loss_G = loss_rec_time + loss_fm + loss_adv + loss_rec_mel
+
+                if args.amp:
+                    scaler.scale(loss_G).backward()
+                    scaler.unscale_(optG)
+                    torch.nn.utils.clip_grad_norm_(netG.parameters(), max_norm=1)
+                    scaler.step(optG)
+                    amp_scale = scaler.get_scale()
+                    scaler.update()
+                    skip_scheduler = amp_scale != scaler.get_scale()
+                else:
+                    loss_G.backward()
+                    optG.step()
+
+                if args.ema is not None:
+                    ema.update(netG, steps)
+
+                # if not skip_scheduler:
+                #     lr_scheduler.step()
                 
-                logits_D_fake, features_D_fake = netD(x_est.detach())
-                logits_D_real, features_D_real = netD(x)
-                
-                loss_D = 0
-                for i, scale in enumerate(logits_D_fake):                    
-                    loss_D += F.relu(1 + scale).mean()
-
-                for i, scale in enumerate(logits_D_real):                    
-                    loss_D += F.relu(1 - scale).mean()
-                
-                loss_D.backward()
-                optD.step()
-                                                              
-                netG.zero_grad(set_to_none=True)                                
-
-                '''generator'''
-                logits_D_fake, features_D_fake = netD(x_est)
-
-                loss_rec_time = F.mse_loss(x_est, x, reduction="mean")
-                loss_rec_mel = criterion_rec_mel(x_est, x)
-                loss_fm = 0
-                loss_adv = 0
-                for i, scale in enumerate(logits_D_fake):
-                    loss_adv += -scale.mean()
-                for i in range(len(features_D_fake)):
-                    for j in range(len(features_D_fake[0])):
-                        loss_fm += F.l1_loss(features_D_fake[i][j], features_D_real[i][j].detach(), reduction="mean") / features_D_real[i][j].detach().abs().mean()
-                
-                loss_G = loss_rec_time + loss_fm + loss_adv + loss_rec_mel
-
-            if args.amp:
-                scaler.scale(loss_G).backward()
-                scaler.unscale_(optG)
-                torch.nn.utils.clip_grad_norm_(netG.parameters(), max_norm=1)
-                scaler.step(optG)
-                amp_scale = scaler.get_scale()
-                scaler.update()
-                skip_scheduler = amp_scale != scaler.get_scale()
-            else:
-                loss_G.backward()
-                optG.step()
-
-            if args.ema is not None:
-                ema.update(netG, steps)
-
-            # if not skip_scheduler:
-            #     lr_scheduler.step()
-            
-            '''metrics'''            
-            metric_logger.update(lossD=loss_D.item())
-            metric_logger.update(lossG=loss_G.item())
-            metric_logger.update(loss_rec_time=loss_rec_time.item())
-            metric_logger.update(loss_rec_mel=loss_rec_mel.item())
-            metric_logger.update(loss_fm=loss_fm.item())
-            metric_logger.update(lr=optG.param_groups[0]["lr"])
+                '''metrics'''            
+                metric_logger.update(lossD=loss_D.item())
+                metric_logger.update(lossG=loss_G.item())
+                metric_logger.update(loss_rec_time=loss_rec_time.item())
+                metric_logger.update(loss_rec_mel=loss_rec_mel.item())
+                metric_logger.update(loss_fm=loss_fm.item())
+                metric_logger.update(lr=optG.param_groups[0]["lr"])
 
 
-            ######################
-            # Update tensorboard #
-            ######################             
-            writer.add_scalar("train/lossD", loss_D.item(), steps)
-            writer.add_scalar("train/lossG", loss_G.item(), steps)
-            writer.add_scalar("train/loss_rec_time", loss_rec_time.item(), steps)
-            writer.add_scalar("train/loss_rec_mel", loss_rec_mel.item(), steps)
-            writer.add_scalar("train/loss_fm", loss_fm.item(), steps)
-            writer.add_scalar("lr", optG.param_groups[0]["lr"], steps)            
+                ######################
+                # Update tensorboard #
+                ######################             
+                writer.add_scalar("train/lossD", loss_D.item(), steps)
+                writer.add_scalar("train/lossG", loss_G.item(), steps)
+                writer.add_scalar("train/loss_rec_time", loss_rec_time.item(), steps)
+                writer.add_scalar("train/loss_rec_mel", loss_rec_mel.item(), steps)
+                writer.add_scalar("train/loss_fm", loss_fm.item(), steps)
+                writer.add_scalar("lr", optG.param_groups[0]["lr"], steps)            
 
-            steps += 1                        
-            if steps % args.save_interval == 0:                
-                loss_rec_time_test = 0
-                loss_rec_mel_test = 0
-                netG.eval()                
-                with torch.no_grad():                                        
-                    for i, (x, _) in enumerate(test_loader):                        
-                        x = x.to(device)
-                        x_est = netG(x)
-                        loss_rec_time_test += F.mse_loss(x_est, x, reduction="mean").item()
-                        loss_rec_mel_test += criterion_rec_mel(x_est, x).item()
-                                
-                loss_rec_time_test /= len(test_loader)
-                loss_rec_mel_test /= len(test_loader)
+                steps += 1                        
+                if steps % args.save_interval == 0:                
+                    loss_rec_time_test = 0
+                    loss_rec_mel_test = 0
+                    netG.eval()                
+                    with torch.no_grad():                                        
+                        for i, (x, _) in enumerate(test_loader):                        
+                            x = x.to(device)
+                            x_est = netG(x)
+                            loss_rec_time_test += F.mse_loss(x_est, x, reduction="mean").item()
+                            loss_rec_mel_test += criterion_rec_mel(x_est, x).item()
+                                    
+                    loss_rec_time_test /= len(test_loader)
+                    loss_rec_mel_test /= len(test_loader)
 
-                for ii, (x, _) in enumerate(test_set):
-                    with torch.no_grad():
-                        x = x.to(device)           
-                        x_est = netG(x.unsqueeze(0))                        
-                    save_sample(root / ("generated_%d.wav" % ii), args.sampling_rate, x_est if x_est.device == torch.device("cpu") else x_est.cpu())
-                    writer.add_audio(
-                            "generated/sample_%d.wav" % ii,
-                            x_est,
-                            epoch,
-                            sample_rate=args.sampling_rate,
-                        )
-                    if ii > 10:
-                        break
+                    for ii, (x, _) in enumerate(test_set):
+                        with torch.no_grad():
+                            x = x.to(device)           
+                            x_est = netG(x.unsqueeze(0))                        
+                        save_sample(root / ("generated_%d.wav" % ii), args.sampling_rate, x_est if x_est.device == torch.device("cpu") else x_est.cpu())
+                        writer.add_audio(
+                                "generated/sample_%d.wav" % ii,
+                                x_est,
+                                epoch,
+                                sample_rate=args.sampling_rate,
+                            )
+                        if ii > 10:
+                            break
 
-                writer.add_scalar("test/loss_rec_time", loss_rec_time_test, steps)
-                writer.add_scalar("test/loss_rec_mel", loss_rec_mel_test, steps)                
+                    writer.add_scalar("test/loss_rec_time", loss_rec_time_test, steps)
+                    writer.add_scalar("test/loss_rec_mel", loss_rec_mel_test, steps)                
 
-                metric_logger.update(loss_rec_time=loss_rec_time)
-                metric_logger.update(loss_rec_mel=loss_rec_mel)
-                
-                netG.train()                
-                                
-                chkpnt = {
-                    'G_model_dict': netG.state_dict(),
-                    'G_opt_dict': optG.state_dict(),
-                    'step': steps,
-                    'D_model_dict': netD.state_dict(),
-                    'D_opt_dict': optD.state_dict(),                    
-                }
-                torch.save(chkpnt, root / "chkpnt.pt")
+                    metric_logger.update(loss_rec_time=loss_rec_time)
+                    metric_logger.update(loss_rec_mel=loss_rec_mel)
+                    
+                    netG.train()                
+                                    
+                    chkpnt = {
+                        'G_model_dict': netG.state_dict(),
+                        'G_opt_dict': optG.state_dict(),
+                        'step': steps,
+                        'D_model_dict': netD.state_dict(),
+                        'D_opt_dict': optD.state_dict(),                    
+                    }
+                    torch.save(chkpnt, root / "chkpnt.pt")
 
 if __name__ == "__main__":
     train()

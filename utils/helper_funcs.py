@@ -5,6 +5,9 @@ import numpy as np
 import torch.distributed as dist
 import copy
 from scipy.io.wavfile import write
+import torchaudio
+from pathlib import Path
+import typing as tp
 
 epsilon = 1e-8
 
@@ -229,6 +232,15 @@ def save_sample(file_path, sampling_rate, audio):
     audio = (audio.numpy() * 32767).astype("int16")
     write(file_path, sampling_rate, audio)
 
+def save_audio(wav: torch.Tensor, path: tp.Union[Path, str],
+               sample_rate: int, rescale: bool = False):
+    limit = 0.99
+    mx = wav.abs().max()
+    if rescale:
+        wav = wav * min(limit / mx, 1)
+    else:
+        wav = wav.clamp(-limit, limit)
+    torchaudio.save(str(path), wav, sample_rate=sample_rate, encoding='PCM_S', bits_per_sample=16)
 
 def rms(x):
     r = np.sqrt((x**2).mean())

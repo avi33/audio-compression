@@ -65,6 +65,7 @@ class CMUDataset(torch.utils.data.Dataset):
             data = json.load(f)
             f_names = [data[s] for s in data.keys()]
             data = [ff for f in f_names for ff in f]
+        data = [d.replace('ARCTIC', 'ARCTIC8k') for i, d in enumerate(data) if i < 100]
         return data
 
     def __getitem__(self, index):

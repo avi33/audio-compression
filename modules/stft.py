@@ -22,7 +22,8 @@ class STFT(nn.Module):
         self.n_fft = n_fft
         self.hop_length = hop_length
         self.win_length = win_length
-        self.sampling_rate = sampling_rate        
+        self.sampling_rate = sampling_rate 
+        self.eps = 1e-8
 
     def forward(self, audio):
         p = (self.n_fft - self.hop_length) // 2
@@ -37,7 +38,7 @@ class STFT(nn.Module):
             return_complex=False
         )
         real_part, imag_part = fft.unbind(-1)
-        magnitude = torch.sqrt(real_part ** 2 + imag_part ** 2)        
+        magnitude = torch.sqrt(real_part ** 2 + imag_part ** 2 + self.eps)        
         return magnitude
 
 class Audio2Mel(nn.Module):
