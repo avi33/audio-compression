@@ -3,6 +3,8 @@ from pydub import AudioSegment
 import soundfile as sf
 import os
 import matplotlib.pyplot as plt
+import sys
+
 
 def snr(x, y):    
     return 10*np.log10((np.abs(x-y)**2).mean() / (np.abs(x)**2).mean())

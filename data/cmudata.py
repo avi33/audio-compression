@@ -1,6 +1,7 @@
 import os
 import torch
 import torchaudio
+import librosa
 torchaudio.set_audio_backend('sox_io')
 import torch.utils.data
 import torch.nn.functional as F
@@ -72,7 +73,8 @@ class CMUDataset(torch.utils.data.Dataset):
         filename = self.audio_files[index]
         spk = filename.split('/')[-3].split('_')[-2]
         spk_idx = self.spk2idx[spk]        
-        audio, sampling_rate = torchaudio.load(filename)        
+        audio, sampling_rate = torchaudio.load(filename)
+        audio = librosa.effects.trim(audio, top_db=60, frame_length=512, hop_length=256)[0]
         # Take segment
         if audio.size(-1) >= self.segment_length:
             max_audio_start = audio.size(-1) - self.segment_length
