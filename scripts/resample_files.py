@@ -12,8 +12,8 @@ def process_file(f, fs_trg=8000):
     dirname = os.path.dirname(ff)
     if not os.path.exists(dirname):
         os.makedirs(dirname)
-    if os.path.isfile(ff):
-        return True
+    # if os.path.isfile(ff):
+    #     return True
     if os.path.getsize(f) < 100:
         return False
     x, fs = librosa.core.load(f, sr=None)
@@ -28,13 +28,14 @@ def process_file(f, fs_trg=8000):
 
 
 def resample_mp(root, root_dst, fs_trg):
-    fnames = glob.glob(root + '/*/wav/*.wav', recursive=True)
+    fnames = glob.glob(root + '/*/*/*.wav', recursive=True)
     print("found ", len(fnames))
     if not os.path.isdir(root_dst):
         os.mkdir(root_dst)
     p = multiprocessing.Pool()
     for i, f in enumerate(fnames):
-        p.apply_async(process_file, [f, root_dst, fs_trg])
+        res = p.apply_async(process_file, [f, fs_trg])
+        # res = process_file(f, fs_trg)        
     p.close()
     p.join()
 

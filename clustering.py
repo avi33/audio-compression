@@ -3,10 +3,11 @@ import numpy as np
 from sklearn.cluster import KMeans
 import argparse
 from pathlib import Path
+import faiss
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--batch_size", default=4, type=int)
+    parser.add_argument("--batch_size", default=64, type=int)
     parser.add_argument("--dataset", default="cmuarctic", type=str)    
     parser.add_argument("--sampling_rate", default=8000, type=int)
     parser.add_argument("--seq_len", default=8000, type=int)
@@ -18,59 +19,78 @@ def parse_args():
     args = parser.parse_args()
     return args
 
-def kmeans_batched(train_loader, test_loader, k):
-    # Split the data into batches
+def get_feat(x):
     win_len = 256
     hop_len = 128
     n_fft = 256
-    num_epochs = 10
-    alpha = 0.8
+    X = torch.stft(x, win_length=win_len, hop_length=hop_len, n_fft=n_fft, window=torch.hann_window(win_len), return_complex=True).abs()
+    X = torch.log10(X + 1e-5)
+    X = X.permute(1, 2, 0).contiguous().view(-1, win_len//2+1).contiguous()
+    return X
+
+def kmeans_batched(train_loader, test_loader, k):
+    # Split the data into batches    
+    num_epochs = 1
+    ema_decay = 0.995
+    batch2buffer = 64
     # Cluster each batch of data
+    X = torch.empty(0)
+    # kmeans = KMeans(n_clusters=k, init='k-means++')
+    kmeans = faiss.Kmeans(d=129, k=30, nredo=10, verbose=True)
     for epoch in range(num_epochs):
         for i, (x, _) in enumerate(train_loader):
-            if i % 10 == 0:
-                print(f"{i}/{len(train_loader)}")
-            X = torch.stft(x.squeeze(1), win_length=win_len, hop_length=hop_len, n_fft=n_fft, window=torch.hann_window(win_len), return_complex=True).abs()
-            X = 10*torch.log10(X + 1e-5)
-            X = X.permute(1, 2, 0).contiguous().view(-1, win_len//2+1).contiguous()
-            if i == 0:
-                # Initialize the k-means algorithm using the first batch of data            
-                kmeans = KMeans(n_clusters=k, init='k-means++')
-                kmeans.fit(X)
+            x = x.squeeze(1)
+            if i % 100 == 0:
+                print(f"{epoch}->{i}/{len(train_loader)}")
+            if epoch == 0 and i < batch2buffer:
+                # Initialize the k-means algorithm using the first batch of data                
+                    X_ = get_feat(x)                    
+                    X = torch.cat((X, X_), dim=0)
+                    continue                    
+            elif epoch == 0 and i == batch2buffer:                
+                kmeans.train(X)
+                ema_cluster_centers = torch.from_numpy(kmeans.centroids).clone()
             else:
+                X = get_feat(x)
                 # Assign each data point to its nearest centroid
-                distances = torch.cdist(X, torch.Tensor(kmeans.cluster_centers_))                
+                distances = torch.cdist(X, torch.from_numpy(kmeans.centroids))
                 nearest_indices = torch.argmin(distances, dim=1)
-            
                 # Update the centroids based on the newly assigned data points                
                 for j in range(k):
-                    new_centroid = torch.mean(X[nearest_indices == j], dim=0)
-                    if epoch > 0 and torch.isnan(torch.from_numpy(kmeans.cluster_centers_)).sum() == 0:
-                        kmeans.cluster_centers_[j] = alpha * new_centroid + (1 - alpha) * kmeans.cluster_centers_[j]
-                    else:
-                        kmeans.cluster_centers_[j] = new_centroid
-                    # kmeans.cluster_centers_[j] = torch.mean(X[nearest_indices == j], dim=0)
-            
+                    kmeans.centroids[j] = torch.mean(X[nearest_indices == j], dim=0)
+
+                ema_cluster_centers = ema_decay * ema_cluster_centers + (1 - ema_decay) * kmeans.centroids            
+                score = torch.sum(torch.min(distances, dim=1)[0] ** 2)
+                if i % 100 == 0:
+                    print("score={}".format(score))
+
+        print(torch.isnan(torch.from_numpy(kmeans.centroids)).sum() == 0)
+        
+        score_test = 0
         for j, (x, _) in enumerate(test_loader):
-            X = torch.stft(x.squeeze(1), win_length=win_len, hop_length=hop_len, n_fft=n_fft, window=torch.hann_window(win_len), return_complex=True).abs()
-            X = 10*torch.log10(X + 1e-5)
-            X = X.permute(1, 2, 0).contiguous().view(-1, win_len//2+1).contiguous()
-            # kmeans.predict(X)
-            inertia = -kmeans.score(X) / X.shape[0]
-            print(f"intertia:{inertia}")
+            X = get_feat(x)
+            score_test += torch.sum(torch.min(distances, dim=1)[0] ** 2)
+        score_test /= len(test_loader)
+        print("score={}".format(score))
     
     # Return the final cluster assignments
-    return kmeans
+    return kmeans.centroids
 
 def run():
     args = parse_args()
     from data.cmudata import CMUDataset
-    train_set = CMUDataset(root=r"/media/avi/8E56B6E056B6C86B/datasets/ARCTIC8k", mode='train', segment_length=args.seq_len, sampling_rate=args.sampling_rate, augment=None)
-    test_set = CMUDataset(root=r"/media/avi/8E56B6E056B6C86B/datasets/ARCTIC8k", mode='test', segment_length=args.seq_len, sampling_rate=args.sampling_rate, augment=None)
+    train_set = CMUDataset(root=r"/media/avi/8E56B6E056B6C86B/datasets/ARCTIC8k", 
+                           mode='train', 
+                           segment_length=args.seq_len, 
+                           sampling_rate=args.sampling_rate, 
+                           augment=None,
+                           trim=False)
+    test_set = CMUDataset(root=r"/media/avi/8E56B6E056B6C86B/datasets/ARCTIC8k", 
+                          mode='test', segment_length=args.seq_len, sampling_rate=args.sampling_rate, augment=None)
     train_loader = torch.utils.data.DataLoader(train_set, batch_size=args.batch_size, shuffle=True, drop_last=True, num_workers=4, pin_memory=False)
     test_loader = torch.utils.data.DataLoader(test_set, batch_size=args.batch_size, shuffle=False, drop_last=False, num_workers=4, pin_memory=False)
-    kmeans = kmeans_batched(train_loader, test_loader, k=10)    
-
+    kmeans_centers = kmeans_batched(train_loader, test_loader, k=30)    
+    torch.save(kmeans_centers, "kmeans.pt")
 
 
 if __name__ == "__main__":
