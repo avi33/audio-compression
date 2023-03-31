@@ -53,7 +53,7 @@ def kmeans_batched(train_loader, test_loader, k):
             else:
                 X = get_feat(x)
                 # Assign each data point to its nearest centroid
-                distances = torch.cdist(X, torch.from_numpy(kmeans.centroids))
+                distances = torch.cdist(X, ema_cluster_centers)
                 nearest_indices = torch.argmin(distances, dim=1)
                 # Update the centroids based on the newly assigned data points                
                 for j in range(k):
@@ -64,14 +64,16 @@ def kmeans_batched(train_loader, test_loader, k):
                 if i % 100 == 0:
                     print("score={}".format(score))
 
-        print(torch.isnan(torch.from_numpy(kmeans.centroids)).sum() == 0)
+        print(torch.isnan(ema_cluster_centers).sum() == 0)
         
         score_test = 0
         for j, (x, _) in enumerate(test_loader):
             X = get_feat(x)
+            distances = torch.cdist(X, ema_cluster_centers)
             score_test += torch.sum(torch.min(distances, dim=1)[0] ** 2)
+            print("score={}".format(score_test/j))
         score_test /= len(test_loader)
-        print("score={}".format(score))
+        print("score={}".format(score_test))
     
     # Return the final cluster assignments
     return kmeans.centroids
