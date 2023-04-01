@@ -28,18 +28,16 @@ def parse_args():
     '''optimizer'''
     parser.add_argument("--max_lr", default=3e-4, type=float)
     parser.add_argument("--wd", default=1e-4, type=float)
-    parser.add_argument('--ema', default=0.995, type=float)
+    parser.add_argument('--ema', default=0.9998, type=float)
     parser.add_argument("--amp", action='store_true', default=False)
     '''loss'''
     parser.add_argument("--loss_type", default="label_smooth", type=str)
+    parser.add_argument("--use_adv", action="store_true", default=False)
     '''debug'''
     parser.add_argument("--save_path", default='outputs/tmp', type=Path)
     parser.add_argument("--load_path", default=None, type=Path)
     parser.add_argument("--save_interval", default=100, type=int)    
     parser.add_argument("--log_interval", default=100, type=int)
-    
-    '''quantization'''
-    parser.add_argument("--quant", action="store_true", default=True)
     
     args = parser.parse_args()
     return args
@@ -49,7 +47,10 @@ def create_dataset(args):
         from data.cmudata import CMUDataset as Dataset        
         train_set = Dataset(root=r"/media/avi/8E56B6E056B6C86B/datasets/ARCTIC8k", mode='train', segment_length=args.seq_len, sampling_rate=args.sampling_rate, augment=None)
         test_set = Dataset(root=r"/media/avi/8E56B6E056B6C86B/datasets/ARCTIC8k", mode='test', segment_length=args.seq_len, sampling_rate=args.sampling_rate, augment=None)
-
+    elif args.dataset == 'vctk':
+        pass
+    else:
+        raise ValueError("wrong dataset {}".format(args.dataset))
     return train_set, test_set
 
 
@@ -69,45 +70,50 @@ def train():
     train_set, test_set = create_dataset(args)
     train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, drop_last=True, num_workers=4, pin_memory=True)
     test_loader = DataLoader(test_set, batch_size=args.batch_size, shuffle=False, drop_last=False, num_workers=4, pin_memory=True)
+
     '''net'''
     from modules.soundsrteam import SoundStream
-    netG = SoundStream(C=32, D=32, n_q=8, codebook_size=10, factors=None)
-    netG.to(device)    
-    from modules.msstftd import MultiScaleSTFTDiscriminator
-    netD = MultiScaleSTFTDiscriminator(filters=32).to(device)
+    net = SoundStream(C=32, D=32, n_q=8, codebook_size=10, factors=None)
+    net.to(device)    
+    
+    if args.use_adv:
+        from modules.msstftd import MultiScaleSTFTDiscriminator
+        netD = MultiScaleSTFTDiscriminator(filters=32).to(device)
+    
     '''losses'''
     from losses.mel_reconstruction_loss import SpectralReconstructionLoss
     criterion_rec_mel = SpectralReconstructionLoss(sr=args.sampling_rate, reduction='mean', device=device)
+    
     '''optimizer'''
     if args.amp:
         from torch.cuda.amp import GradScaler
         scaler = GradScaler(init_scale=2**10)
-        eps = 1e-4
+        eps = 1e-4    
     else:
         scaler = None
         eps = 1e-8
-    
-    parametersG = add_weight_decay(netG, weight_decay=args.wd, skip_list=())
-    optG = optim.AdamW(parametersG, lr=args.max_lr, betas=(0.9, 0.99), eps=eps, weight_decay=0)
-
-    optD = optim.AdamW(netD.parameters(), lr=args.max_lr, betas=(0.9, 0.99), eps=eps, weight_decay=0)
-    # lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(opt,
-    #                                                    max_lr=args.max_lr,
-    #                                                    steps_per_epoch=len(train_loader),
-    #                                                    epochs=args.n_epochs,
-    #                                                    pct_start=0.1,                                                       
-    #                                                 )        
-    if args.ema is not None:
-        from modules.ema import ModelEma as EMA
-        ema = EMA(netG, decay_per_epoch=args.ema)
-        epochs_from_last_reset = 0
-        decay_per_epoch_orig = args.ema
-        
-
-    torch.backends.cudnn.benchmark = True
-    acc_test = 0
-    steps = 0        
     skip_scheduler = False
+    
+    '''filter parameters from weight decay'''
+    parameters = add_weight_decay(net, weight_decay=args.wd, skip_list=())
+    opt = optim.AdamW(parameters, lr=args.max_lr, betas=(0.9, 0.99), eps=eps, weight_decay=0)
+
+    if args.use_adv:
+        optD = optim.AdamW(netD.parameters(), lr=args.max_lr, betas=(0.9, 0.99), eps=eps, weight_decay=0)
+    
+    '''learning rate scheduler'''
+    lr_scheduler = torch.optim.lr_scheduler.OneCycleLR(opt,
+                                                       max_lr=args.max_lr,
+                                                       steps_per_epoch=len(train_loader),
+                                                       epochs=args.n_epochs,
+                                                       pct_start=0.1,                                                       
+                                                    )
+    '''EMA'''
+    if args.ema is not None:
+        from modules.ema import ModelEmaFast as EMA
+        ema = EMA(net, decay_per_epoch=args.ema)
+        epochs_from_last_reset = 0
+        decay_per_epoch_orig = args.ema    
 
     ##########################
     # Dumping original audio #
@@ -123,12 +129,14 @@ def train():
 
     if load_root and load_root.exists():
         checkpoint = torch.load(load_root / "chkpnt.pt")
-        netG.load_state_dict(checkpoint['G_model_dict'])
-        optG.load_state_dict(checkpoint['G_opt_dict'])
+        net.load_state_dict(checkpoint['G_model_dict'])
+        opt.load_state_dict(checkpoint['G_opt_dict'])
         netD.load_state_dict(checkpoint['D_model_dict'])
         optD.load_state_dict(checkpoint['D_opt_dict'])        
         print('checkpoints loaded')
 
+    steps = 0
+    torch.backends.cudnn.benchmark = True
     for epoch in range(1, args.n_epochs + 1):
         metric_logger = logger.MetricLogger(delimiter="  ")
         metric_logger.add_meter("lr", logger.SmoothedValue(window_size=1, fmt="{value:.6f}"))

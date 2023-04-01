@@ -8,6 +8,7 @@ from scipy.io.wavfile import write
 import torchaudio
 from pathlib import Path
 import typing as tp
+import matplotlib.pyplot as plt
 
 epsilon = 1e-8
 
@@ -250,3 +251,14 @@ def flatten_list(nested_list):
     import itertools
     flat_list = list(itertools.chain(*nested_list))
     return flat_list
+
+def plot_spectrogram(spec):
+    fig, ax = plt.subplots(figsize=(10, 2))
+    im = ax.imshow(spec, aspect="auto", origin="lower",
+                   interpolation='none')
+    plt.colorbar(im, ax=ax)
+
+    fig.canvas.draw()
+    plt.close()
+
+    return fig
