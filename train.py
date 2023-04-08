@@ -13,8 +13,13 @@ import utils.logger as logger
 import copy
 from utils.helper_funcs import save_sample, save_audio
 
-
+print(torch.cuda.is_available())
+print(torch.cuda.get_device_name(device=None))
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+torch.cuda.empty_cache()
+# 0MB allocation and cache
+print(torch.cuda.memory_allocated()/1024**2)
+print(torch.cuda.memory_cached()/1024**2)
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -23,6 +28,10 @@ def parse_args():
     parser.add_argument("--n_epochs", default=100, type=int)
     parser.add_argument("--sampling_rate", default=8000, type=int)
     parser.add_argument("--seq_len", default=8000, type=int)
+    parser.add_argument('--augs_signal', nargs='+', type=str,
+                        default=['amp', 'neg'])
+    parser.add_argument('--augs_noise', nargs='+', type=str,
+                        default=[])
     '''net'''
     parser.add_argument("--net_type", default="cnn", type=str)
     '''optimizer'''
@@ -72,8 +81,10 @@ def train():
     test_loader = DataLoader(test_set, batch_size=args.batch_size, shuffle=False, drop_last=False, num_workers=4, pin_memory=True)
 
     '''net'''
-    from modules.soundsrteam import SoundStream
-    net = SoundStream(C=32, D=32, n_q=8, codebook_size=10, factors=None)
+    # from modules.soundsrteam import SoundStream
+    # net = SoundStream(C=32, D=32, n_q=8, codebook_size=10, factors=None)
+    from modules.compressnet import Net
+    net = Net(  )
     net.to(device)    
     
     if args.use_adv:
@@ -110,7 +121,7 @@ def train():
                                                     )
     '''EMA'''
     if args.ema is not None:
-        from modules.ema import ModelEmaFast as EMA
+        from modules.ema import ModelEma as EMA
         ema = EMA(net, decay_per_epoch=args.ema)
         epochs_from_last_reset = 0
         decay_per_epoch_orig = args.ema    
@@ -205,8 +216,8 @@ def train():
                 if args.ema is not None:
                     ema.update(netG, steps)
 
-                # if not skip_scheduler:
-                #     lr_scheduler.step()
+                if not skip_scheduler:
+                    lr_scheduler.step()
                 
                 '''metrics'''            
                 metric_logger.update(lossD=loss_D.item())

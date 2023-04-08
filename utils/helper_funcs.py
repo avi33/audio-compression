@@ -115,7 +115,7 @@ def accuracy(output, target, topk=(1,)):
     pred = pred.t()
     with torch.no_grad():
         correct = pred.eq(target.view(1, -1).expand_as(pred))
-    return [correct[:k].view(-1).float().sum(0) * 100. / batch_size for k in topk]
+    return [correct[:k].reshape(-1).float().sum(0) * 100. / batch_size for k in topk]
 
 
 def average_precision(output, target):
