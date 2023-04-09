@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 
 epsilon = 1e-8
 
+MelSpec = torchaudio.transforms.MelSpectrogram(sample_rate=8000, n_fft=256, n_mels=64, win_length=256, hop_length=64, f_min=40, f_max=3800)
 
 class AugBasic:
     def __init__(self, fs):
@@ -252,7 +253,10 @@ def flatten_list(nested_list):
     flat_list = list(itertools.chain(*nested_list))
     return flat_list
 
-def plot_spectrogram(spec):
+def plot_spectrogram(wav):    
+    wav = wav.float()
+    spec = MelSpec(wav)
+    spec = 10*torch.log10(spec + 1e-5)
     fig, ax = plt.subplots(figsize=(10, 2))
     im = ax.imshow(spec, aspect="auto", origin="lower",
                    interpolation='none')

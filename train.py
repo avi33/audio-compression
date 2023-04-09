@@ -11,7 +11,7 @@ from pathlib import Path
 from utils.helper_funcs import add_weight_decay
 import utils.logger as logger
 import copy
-from utils.helper_funcs import save_sample, save_audio
+from utils.helper_funcs import save_sample, save_audio, plot_spectrogram
 
 print(torch.cuda.is_available())
 print(torch.cuda.get_device_name(device=None))
@@ -39,16 +39,18 @@ def parse_args():
     parser.add_argument("--wd", default=1e-4, type=float)
     parser.add_argument('--ema', default=0.9998, type=float)
     parser.add_argument("--amp", action='store_true', default=False)
-    '''loss'''
-    parser.add_argument("--loss_type", default="label_smooth", type=str)
+    
     parser.add_argument("--use_adv", action="store_true", default=False)
-    '''debug'''
+    '''general'''
+    parser.add_argument("--num_workers", default=0, type=int)
     parser.add_argument("--save_path", default='outputs/tmp', type=Path)
     parser.add_argument("--load_path", default=None, type=Path)
     parser.add_argument("--save_interval", default=100, type=int)    
     parser.add_argument("--log_interval", default=100, type=int)
     
-    args = parser.parse_args()
+    # args = parser.parse_args()
+    args, unknown = parser.parse_known_args()
+
     return args
 
 def create_dataset(args):
@@ -77,14 +79,14 @@ def train():
     writer = SummaryWriter(str(root))
     '''data'''
     train_set, test_set = create_dataset(args)
-    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, drop_last=True, num_workers=4, pin_memory=True)
-    test_loader = DataLoader(test_set, batch_size=args.batch_size, shuffle=False, drop_last=False, num_workers=4, pin_memory=True)
+    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, drop_last=True, num_workers=args.num_workers, pin_memory=True)
+    test_loader = DataLoader(test_set, batch_size=args.batch_size, shuffle=False, drop_last=False, num_workers=args.num_workers, pin_memory=True)
 
     '''net'''
-    # from modules.soundsrteam import SoundStream
-    # net = SoundStream(C=32, D=32, n_q=8, codebook_size=10, factors=None)
-    from modules.compressnet import Net
-    net = Net(  )
+    from modules.soundsrteam import SoundStream
+    net = SoundStream(C=32, D=32, n_q=8, codebook_size=10, factors=None)
+    # from modules.compressnet import Net
+    # net = Net(  )
     net.to(device)    
     
     if args.use_adv:
@@ -134,16 +136,19 @@ def train():
         save_sample(root / ("original_%d.wav" % i), args.sampling_rate, x_t)
         save_audio(x_t, root / ("original_%d.wav" % i), args.sampling_rate)
         writer.add_audio("original/sample_%d.wav" % i, x_t, 0, sample_rate=args.sampling_rate)
+        writer.add_figure((root / ("original_%d" % i)).__str__(), 
+                           plot_spectrogram(x_t[0] if x_t.device == torch.device("cpu") else x_t.cpu()[0]))
         test_audio.append(test_audio)
         if i > 10:
             break
 
     if load_root and load_root.exists():
         checkpoint = torch.load(load_root / "chkpnt.pt")
-        net.load_state_dict(checkpoint['G_model_dict'])
-        opt.load_state_dict(checkpoint['G_opt_dict'])
-        netD.load_state_dict(checkpoint['D_model_dict'])
-        optD.load_state_dict(checkpoint['D_opt_dict'])        
+        net.load_state_dict(checkpoint['model_dict'])
+        opt.load_state_dict(checkpoint['opt_dict'])
+        if args.use_adv:
+            netD.load_state_dict(checkpoint['D_model_dict'])
+            optD.load_state_dict(checkpoint['D_opt_dict'])
         print('checkpoints loaded')
 
     steps = 0
@@ -162,10 +167,11 @@ def train():
             ema.set_decay_per_step(len(train_loader))        
         
         for iterno, (x, _) in  enumerate(metric_logger.log_every(train_loader, args.log_interval, header)):                    
-            x = x.to(device)
-            with torch.autograd.detect_anomaly():         
-                with torch.cuda.amp.autocast(enabled=scaler is not None):                                                
-                    x_est = netG(x)                
+            x = x.to(device)            
+            with torch.cuda.amp.autocast(enabled=scaler is not None):                                                
+                x_est = net(x)                
+                
+                if args.use_adv:
                     #######################
                     # Train Discriminator #
                     #######################
@@ -183,70 +189,72 @@ def train():
                     
                     loss_D.backward()
                     optD.step()
-                                                                
-                    netG.zero_grad(set_to_none=True)                                
 
-                    '''generator'''
+                '''generator'''
+                net.zero_grad(set_to_none=True)                                
+                
+                if args.use_adv:
                     logits_D_fake, features_D_fake = netD(x_est)
-
-                    loss_rec_time = F.mse_loss(x_est, x, reduction="mean")
-                    loss_rec_mel = criterion_rec_mel(x_est, x)
                     loss_fm = 0
                     loss_adv = 0
                     for i, scale in enumerate(logits_D_fake):
                         loss_adv += -scale.mean()
+
                     for i in range(len(features_D_fake)):
                         for j in range(len(features_D_fake[0])):
                             loss_fm += F.l1_loss(features_D_fake[i][j], features_D_real[i][j].detach(), reduction="mean") / features_D_real[i][j].detach().abs().mean()
-                    
-                    loss_G = loss_rec_time + loss_fm + loss_adv + loss_rec_mel
+
+                # loss_rec_time = F.mse_loss(x_est, x, reduction="mean")
+                loss = criterion_rec_mel(x_est, x)
+                
+                if args.use_adv:
+                    loss += loss_adv + loss_fm                
 
                 if args.amp:
-                    scaler.scale(loss_G).backward()
-                    scaler.unscale_(optG)
-                    torch.nn.utils.clip_grad_norm_(netG.parameters(), max_norm=1)
-                    scaler.step(optG)
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(opt)
+                    torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1)
+                    scaler.step(opt)
                     amp_scale = scaler.get_scale()
                     scaler.update()
                     skip_scheduler = amp_scale != scaler.get_scale()
                 else:
-                    loss_G.backward()
-                    optG.step()
+                    loss.backward()
+                    opt.step()
 
                 if args.ema is not None:
-                    ema.update(netG, steps)
+                    ema.update(net, steps)
 
                 if not skip_scheduler:
                     lr_scheduler.step()
                 
                 '''metrics'''            
-                metric_logger.update(lossD=loss_D.item())
-                metric_logger.update(lossG=loss_G.item())
-                metric_logger.update(loss_rec_time=loss_rec_time.item())
-                metric_logger.update(loss_rec_mel=loss_rec_mel.item())
-                metric_logger.update(loss_fm=loss_fm.item())
-                metric_logger.update(lr=optG.param_groups[0]["lr"])
-
+                metric_logger.update(loss=loss.item())                                
+                metric_logger.update(lr=opt.param_groups[0]["lr"])
+                
+                if args.use_adv:
+                    metric_logger.update(lossD=loss_D.item())                
+                    metric_logger.update(loss_fm=loss_fm.item())
 
                 ######################
                 # Update tensorboard #
                 ######################             
-                writer.add_scalar("train/lossD", loss_D.item(), steps)
-                writer.add_scalar("train/lossG", loss_G.item(), steps)
-                writer.add_scalar("train/loss_rec_time", loss_rec_time.item(), steps)
-                writer.add_scalar("train/loss_rec_mel", loss_rec_mel.item(), steps)
-                writer.add_scalar("train/loss_fm", loss_fm.item(), steps)
-                writer.add_scalar("lr", optG.param_groups[0]["lr"], steps)            
+                writer.add_scalar("train/loss", loss.item(), steps)
+                writer.add_scalar("lr", opt.param_groups[0]["lr"], steps)
+
+                if args.use_adv:
+                    writer.add_scalar("train/lossD", loss_D.item(), steps)                                
+                    writer.add_scalar("train/loss_fm", loss_fm.item(), steps)                                
 
                 steps += 1                        
                 if steps % args.save_interval == 0:                
                     loss_rec_time_test = 0
                     loss_rec_mel_test = 0
-                    netG.eval()                
+                    net.eval()                
                     with torch.no_grad():                                        
                         for i, (x, _) in enumerate(test_loader):                        
                             x = x.to(device)
-                            x_est = netG(x)
+                            x_est = net(x)
                             loss_rec_time_test += F.mse_loss(x_est, x, reduction="mean").item()
                             loss_rec_mel_test += criterion_rec_mel(x_est, x).item()
                                     
@@ -256,7 +264,7 @@ def train():
                     for ii, (x, _) in enumerate(test_set):
                         with torch.no_grad():
                             x = x.to(device)           
-                            x_est = netG(x.unsqueeze(0))                        
+                            x_est = net(x.unsqueeze(0))                        
                         save_sample(root / ("generated_%d.wav" % ii), args.sampling_rate, x_est if x_est.device == torch.device("cpu") else x_est.cpu())
                         writer.add_audio(
                                 "generated/sample_%d.wav" % ii,
@@ -264,24 +272,29 @@ def train():
                                 epoch,
                                 sample_rate=args.sampling_rate,
                             )
+                        writer.add_figure((root / ("generated_%d.wav" % ii)).__str__(), 
+                                           plot_spectrogram(x_est[0, 0] if x_est.device == torch.device("cpu") else x_est.cpu()[0, 0]), 
+                                           steps)
                         if ii > 10:
                             break
 
                     writer.add_scalar("test/loss_rec_time", loss_rec_time_test, steps)
-                    writer.add_scalar("test/loss_rec_mel", loss_rec_mel_test, steps)                
+                    writer.add_scalar("test/loss_rec_mel", loss_rec_mel_test, steps)
 
-                    metric_logger.update(loss_rec_time=loss_rec_time)
-                    metric_logger.update(loss_rec_mel=loss_rec_mel)
+                    metric_logger.update(loss_rec_time=loss_rec_time_test)
+                    metric_logger.update(loss_rec_mel=loss_rec_mel_test)
                     
-                    netG.train()                
+                    net.train()                
                                     
                     chkpnt = {
-                        'G_model_dict': netG.state_dict(),
-                        'G_opt_dict': optG.state_dict(),
-                        'step': steps,
-                        'D_model_dict': netD.state_dict(),
-                        'D_opt_dict': optD.state_dict(),                    
+                        'model_dict': net.state_dict(),
+                        'opt_dict': opt.state_dict(),
+                        'step': steps
                     }
+                    
+                    if args.use_adv:
+                        chkpnt['D_model_dict'] = netD.state_dict()
+                        chkpnt['D_opt_dict'] = optD.state_dict()
                     torch.save(chkpnt, root / "chkpnt.pt")
 
 if __name__ == "__main__":

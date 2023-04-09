@@ -89,7 +89,7 @@ class CMUDataset(torch.utils.data.Dataset):
                 audio, (0, self.segment_length - audio.size(0)), "constant"
             ).data
         #if audio.shape[-1] != 8000:
-        return audio, spk_idx
+        return audio.unsqueeze_(0), spk_idx
 
     def __len__(self):
         return len(self.audio_files)
