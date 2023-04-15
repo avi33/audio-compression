@@ -101,7 +101,7 @@ def train():
     # net.to(device)
     # Initialize networks
     
-    from byol2 import BYOL
+    from byol import BYOL
     from modules.encoder import ContentEncoder
     online_network = ContentEncoder(dim_input=1, dim_latent=1, win_len=1024, hop_len=256, n_fft=1024)
     target_network = ContentEncoder(dim_input=1, dim_latent=1, win_len=1024, hop_len=256, n_fft=1024)
