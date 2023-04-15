@@ -51,7 +51,7 @@ class CMUDataset(torch.utils.data.Dataset):
     This is the main class that calculates the spectrogram and returns the
     spectrogram, audio pair.
     """
-    def __init__(self, root, mode, segment_length, sampling_rate, augment=None, trim=False):
+    def __init__(self, root, mode, segment_length, sampling_rate, augment=None, trim=False, return_orig=False):
         self.root = root
         self.mode = mode
         self.sampling_rate = sampling_rate
@@ -59,16 +59,16 @@ class CMUDataset(torch.utils.data.Dataset):
         self.trim = trim
         self.audio_files = self.__parse_data()                
         self.speakers = self.get_speakers()        
-        self.augs = AudioAugs(fs=sampling_rate, augs=augment) if augment else None
+        self.transform = AudioAugs(fs=sampling_rate, k_augs=augment) if augment else None
         self.num_speakers = len(self.speakers)
-        self.spk2idx = dict(zip(self.speakers, range(self.num_speakers)))        
+        self.spk2idx = dict(zip(self.speakers, range(self.num_speakers)))
+        self.return_orig = return_orig     
 
     def __parse_data(self):
         with open(self.root + '/' + self.mode + '.json', 'r') as f:
             data = json.load(f)
             f_names = [data[s] for s in data.keys()]
             data = [ff for f in f_names for ff in f]
-        # data = [d.replace('ARCTIC', 'ARCTIC8k') for i, d in enumerate(data)]
         return data
 
     def __getitem__(self, index):
@@ -88,8 +88,15 @@ class CMUDataset(torch.utils.data.Dataset):
             audio = F.pad(
                 audio, (0, self.segment_length - audio.size(0)), "constant"
             ).data
-        #if audio.shape[-1] != 8000:
-        return audio.unsqueeze_(0), spk_idx
+
+        if self.transform is not None:
+            if self.return_orig:
+                audio_a = self.transform(audio.clone())
+                return audio.unsqueeze_(0), spk_idx, audio_a.unsqueeze_(0)
+            
+            else:                
+                audio = self.transform(audio.clone())
+                return audio.unsqueeze_(0), spk_idx
 
     def __len__(self):
         return len(self.audio_files)

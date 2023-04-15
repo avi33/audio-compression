@@ -400,11 +400,4 @@ class AudioAugs():
 
 
 if __name__ == "__main__":
-    r = RandomRIR(fs=22050, p=1)
-    x = torch.zeros(22050)
-    x[0:100] = 1
-    y = r(x)
-    import matplotlib.pyplot as plt
-    plt.plot(x)
-    plt.plot(y[0].view(-1), 'r')
-    plt.show()
+    pass
