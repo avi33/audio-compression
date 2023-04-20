@@ -24,7 +24,7 @@ def parse_args():
     parser.add_argument("--sampling_rate", default=8000, type=int)
     parser.add_argument("--seq_len", default=8000, type=int)
     parser.add_argument('--augs_signal', nargs='+', type=str,
-                        default=['amp', 'neg'])
+                        default=['amp', 'neg', 'tshift', 'pitchshift', 'cycshift', 'flip'])
     parser.add_argument('--augs_noise', nargs='+', type=str,
                         default=[])        
     '''optimizer'''
@@ -96,16 +96,12 @@ def train():
     ####################################
     # Network                          #
     ####################################    
-    # from byol import BYOL
-    # net = BYOL()
-    # net.to(device)
-    # Initialize networks
-    
     from byol import BYOL
+    from byol import Predictor
     from modules.encoder import ContentEncoder
     online_network = ContentEncoder(dim_input=1, dim_latent=1, win_len=1024, hop_len=256, n_fft=1024)
     target_network = ContentEncoder(dim_input=1, dim_latent=1, win_len=1024, hop_len=256, n_fft=1024)
-    predictor_network = nn.Sequential(nn.Conv1d(256, 256, 1, 1))
+    predictor_network = Predictor((1024//2+1)*2, (1024//2+1)*2//4)
 
     # Initialize BYOL module
     net = BYOL(online_network, target_network, predictor_network)
@@ -173,7 +169,8 @@ def train():
             xa = xa.to(device)
             with torch.cuda.amp.autocast(enabled=scaler is not None):                                                
                 z1, z2, p1, p2 = net(x, xa)
-                loss = net.compute_loss(z1, z2, p1, p2)                
+                
+                loss = BYOL.compute_loss(z1, z2, p1, p2)
                 
                 net.zero_grad(set_to_none=True)                
                 

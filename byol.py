@@ -6,27 +6,36 @@ import torch.optim as optim
 def update_ema_jit(ema_v: torch.Tensor, model_v: torch.Tensor, decay_per_step: float, model_factor: float):
     ema_v.mul_(decay_per_step).add_(model_factor * model_v.float())
 
+class Predictor(nn.Module):
+    def __init__(self, emb_dim, latent_dim):
+        super(Predictor, self).__init__()
+        self.block = nn.Sequential(
+            nn.Conv1d(emb_dim, latent_dim, 3, 1, 1, bias=False),
+            nn.BatchNorm1d(latent_dim),
+            nn.LeakyReLU(0.1, True),
+            nn.Conv1d(latent_dim, emb_dim, 3, 1, 1, bias=False),
+            nn.BatchNorm1d(emb_dim),
+            nn.LeakyReLU(0.1, True),
+        )
+
+    def forward(self, x):        
+        return self.block(x)
+
 class BYOL(nn.Module):
-    def __init__(self, online_network, target_network, predictor_network, tau=0.996):
+    def __init__(self, online_network, target_network, predictor_network, ema_dacay=0.995):
         super(BYOL, self).__init__()
         self.remove_jit = False
-        # Initialize online and target networks
+        # initialize online and target networks
         self.online_network = online_network
         self.target_network = target_network
-        #ensure same initialization
+        # ensure same initialization
         self.target_network.load_state_dict(self.online_network.state_dict())
         
-        # Initialize predictor network
+        # initialize predictor network
         self.predictor_network = predictor_network
-        
-        # Set target network to eval mode
-        self.target_network.eval()
-        
-        # Set optimizer
-        self.optimizer = optim.SGD(self.online_network.parameters(), lr=0.2, momentum=0.9, weight_decay=1.5e-6)
-        
-        # Set temperature parameter for loss function
-        self.tau = tau
+                
+        self.target_network.eval()            
+        self.ema_dacay = ema_dacay
         
     def update_target_network(self):
         # Update target network using momentum-based update rule
@@ -43,7 +52,7 @@ class BYOL(nn.Module):
         
         # Compute target network outputs
         with torch.no_grad():            
-            z2 = self.target_network(x2)
+            z2 = self.target_network(x2).detach()
         
         # Compute online and target network predictions
         p1 = self.predictor_network(z1)
@@ -53,19 +62,8 @@ class BYOL(nn.Module):
 
         return z1, z2, p1, p2
     
-    def compute_loss(self, z1, z2, p1, p2):
+    @staticmethod
+    def compute_loss(z1, z2, p1, p2):
         # Compute BYOL loss
         loss = F.mse_loss(p1, z2.detach()) + F.mse_loss(p2, z1.detach())
-        return loss        
-
-    def train_step(self, x1, x2):
-        # Compute loss and perform backward pass
-        loss = self.forward(x1, x2)
-        self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
-        
-        # Update target network
-        self.update_target_network()
-        
         return loss
