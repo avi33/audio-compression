@@ -56,9 +56,7 @@ class BYOL(nn.Module):
         
         # Compute online and target network predictions
         p1 = self.predictor_network(z1)
-        p2 = self.predictor_network(z2)
-        
-        self.update_target_network()
+        p2 = self.predictor_network(z2)        
 
         return z1, z2, p1, p2
     

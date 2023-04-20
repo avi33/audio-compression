@@ -186,6 +186,9 @@ def train():
                     loss.backward()
                     opt.step()
 
+                #ema on target network
+                net.update_target_network()
+
             if args.ema is not None and args.ema > 0:
                 ema.update(net, steps)
 
