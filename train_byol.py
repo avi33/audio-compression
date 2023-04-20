@@ -22,7 +22,7 @@ def parse_args():
     parser.add_argument("--dataset", default="cmuarctic", type=str)
     parser.add_argument("--n_epochs", default=100, type=int)
     parser.add_argument("--sampling_rate", default=8000, type=int)
-    parser.add_argument("--seq_len", default=8000, type=int)
+    parser.add_argument("--seq_len", default=4000, type=int)
     parser.add_argument('--augs_signal', nargs='+', type=str,
                         default=['amp', 'neg', 'tshift', 'pitchshift', 'cycshift', 'flip'])
     parser.add_argument('--augs_noise', nargs='+', type=str,
@@ -99,8 +99,13 @@ def train():
     from byol import BYOL
     from byol import Predictor
     from modules.encoder import ContentEncoder
+    
     online_network = ContentEncoder(dim_input=1, dim_latent=1, win_len=1024, hop_len=256, n_fft=1024)
+    
     target_network = ContentEncoder(dim_input=1, dim_latent=1, win_len=1024, hop_len=256, n_fft=1024)
+    for p in target_network.parameters():
+        p.requires_grad_(False)
+        
     predictor_network = Predictor(256, 64)
 
     # Initialize BYOL module
@@ -119,7 +124,7 @@ def train():
     skip_scheduler = False
     
     '''filter parameters from weight decay'''
-    parameters = add_weight_decay(net, weight_decay=args.wd, skip_list=())
+    parameters = add_weight_decay(net.online_network, weight_decay=args.wd, skip_list=())
     opt = optim.AdamW(parameters, lr=args.max_lr, betas=(0.9, 0.99), eps=eps, weight_decay=0)
     
     
@@ -133,7 +138,7 @@ def train():
     '''EMA'''
     if args.ema is not None and args.ema > 0:
         from modules.ema import ModelEma as EMA
-        ema = EMA(net, decay_per_epoch=args.ema)
+        ema = EMA(net.online_network, decay_per_epoch=args.ema)
         epochs_from_last_reset = 0
         decay_per_epoch_orig = args.ema
     
@@ -172,12 +177,12 @@ def train():
                 
                 loss = BYOL.compute_loss(z1, z2, p1, p2) / x.shape[0]
                 
-                net.zero_grad(set_to_none=True)
+                net.online_network.zero_grad(set_to_none=True)
                 
                 if args.amp:
                     scaler.scale(loss).backward()
                     scaler.unscale_(opt)
-                    torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=1)
+                    torch.nn.utils.clip_grad_norm_(net.online_network.parameters(), max_norm=1)
                     scaler.step(opt)
                     amp_scale = scaler.get_scale()
                     scaler.update()
@@ -189,8 +194,9 @@ def train():
                 #ema on target network
                 net.update_target_network()
 
+            #ema update on online network - not part of byol
             if args.ema is not None and args.ema > 0:
-                ema.update(net, steps)
+                ema.update(net.online_network, steps)
 
             if not skip_scheduler:
                 lr_scheduler.step()
@@ -223,7 +229,7 @@ def train():
                 writer.add_scalar("test/loss", loss_test, steps)
                                                                     
                 chkpnt = {
-                    'model_dict': net.state_dict(),
+                    'model_dict': net.online_network.state_dict(),
                     'opt_dict': opt.state_dict(),
                     'step': steps
                 }

@@ -1,9 +1,8 @@
 import torch
 import torch.nn.functional as F
 import random
-from utils.resample import Resampler
-from utils.helper_funcs import AugBasic
-
+from resample import Resampler
+# from utils.helper_funcs import AugBasic
 
 def pad_sample_seq_batch(x, n_samples):
     if x.size(0) >= n_samples:
@@ -24,7 +23,45 @@ def batch_resample(Resample, data, seq_len):
     return data
 
 
-class BatchAugs(AugBasic):
+def kmeans_pseudo_label(X, num_clusters, num_iterations=100):
+    """
+    K-means clustering algorithm implementation in PyTorch.
+    
+    Args:
+        X (torch.Tensor): Input data matrix of size (N, D).
+        num_clusters (int): Number of clusters to find.
+        num_iterations (int): Number of iterations to run the algorithm.
+    
+    Returns:
+        centroids (torch.Tensor): Matrix of size (num_clusters, D) containing the centroid vectors.
+        labels (torch.Tensor): Vector of size (N,) containing the assigned cluster labels.
+    """
+    batch_sz, n_channels, n_frames = X.shape
+    X = X.permute(0, 2, 1).contiguous().view(-1, n_channels)
+    # Initialize centroids randomly
+    num_examples = batch_sz * n_frames
+    random_indices = torch.randperm(num_examples)[:num_clusters]
+    centroids = X[random_indices]
+    
+    for i in range(num_iterations):
+        # Compute distances between examples and centroids
+        distances = torch.cdist(X, centroids, p=1)
+        
+        # Assign examples to nearest centroid
+        labels = torch.argmin(distances, dim=1)
+        
+        # Update centroids
+        for j in range(num_clusters):
+            mask = labels == j
+            if mask.sum() == 0:
+                continue
+            centroids[j] = X[mask].mean(dim=0)
+    
+    labels = labels.view(batch_sz, n_frames)
+    
+    return labels
+
+class BatchAugs():
     def __init__(self, params):
         super().__init__(fs=params['fs'])
         self.params = params
@@ -63,8 +100,10 @@ class BatchAugs(AugBasic):
                 x, y = self.phmix(x, y)
             elif aug == 'freqmix':
                 x, y = self.freqmix(x, y)
+            elif aug == 'kmeans_pl':
+                pl = kmeans_pseudo_label(x)
             else:
-                raise ValueError("wrong mix aug")
+                raise ValueError("wrong mix aug")            
         else:
             is_mixed = False
         return x, y, is_mixed
@@ -104,7 +143,7 @@ class BatchAugs(AugBasic):
         data.squeeze_(1)
         idx = torch.randperm(data.size(0))
         idx_win = random.randint(0, len(self.params['fft_params']['win_len'])-1)
-        win = torch.hann_window(self.params['fft_params']['win_len'][idx_win]).to(data.device)
+        win = torch.hann_window(self.params['fft_params']['win_len'][idx_win], device=data.device))
         X = torch.stft(data,
                        win_length=self.params['fft_params']['win_len'][idx_win],
                        hop_length=self.params['fft_params']['hop_len'][idx_win],
@@ -180,4 +219,6 @@ class BatchAugs(AugBasic):
 
 
 if __name__ == '__main__':
-    pass
+    x = torch.randn(2, 256, 32)
+    y = KMEANSPseudoLabel(x, num_clusters=20, num_iterations=10)
+    print(y)
