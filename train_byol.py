@@ -30,7 +30,7 @@ def parse_args():
     '''optimizer'''
     parser.add_argument("--max_lr", default=3e-4, type=float)
     parser.add_argument("--wd", default=1e-4, type=float)
-    parser.add_argument('--ema', default=0, type=float)
+    parser.add_argument('--ema', default=0.995, type=float)
     parser.add_argument("--amp", action='store_true', default=False)
     parser.add_argument("--use_adv", action="store_true", default=False)
     '''general'''
@@ -90,8 +90,8 @@ def train():
     ####################################
     train_set, test_set = create_dataset(args)
     
-    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, drop_last=True, num_workers=args.num_workers, pin_memory=True)
-    test_loader = DataLoader(test_set, batch_size=args.batch_size, shuffle=False, drop_last=False, num_workers=args.num_workers, pin_memory=True)
+    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, drop_last=True, num_workers=args.num_workers, pin_memory=False)
+    test_loader = DataLoader(test_set, batch_size=args.batch_size, shuffle=False, drop_last=False, num_workers=args.num_workers, pin_memory=False)
 
     ####################################
     # Network                          #
@@ -101,7 +101,7 @@ def train():
     from modules.encoder import ContentEncoder
     online_network = ContentEncoder(dim_input=1, dim_latent=1, win_len=1024, hop_len=256, n_fft=1024)
     target_network = ContentEncoder(dim_input=1, dim_latent=1, win_len=1024, hop_len=256, n_fft=1024)
-    predictor_network = Predictor((1024//2+1)*2, (1024//2+1)*2//4)
+    predictor_network = Predictor(256, 64)
 
     # Initialize BYOL module
     net = BYOL(online_network, target_network, predictor_network)
@@ -170,9 +170,9 @@ def train():
             with torch.cuda.amp.autocast(enabled=scaler is not None):                                                
                 z1, z2, p1, p2 = net(x, xa)
                 
-                loss = BYOL.compute_loss(z1, z2, p1, p2)
+                loss = BYOL.compute_loss(z1, z2, p1, p2) / x.shape[0]
                 
-                net.zero_grad(set_to_none=True)                
+                net.zero_grad(set_to_none=True)
                 
                 if args.amp:
                     scaler.scale(loss).backward()
@@ -186,49 +186,49 @@ def train():
                     loss.backward()
                     opt.step()
 
-                if args.ema is not None and args.ema > 0:
-                    ema.update(net, steps)
+            if args.ema is not None and args.ema > 0:
+                ema.update(net, steps)
 
-                if not skip_scheduler:
-                    lr_scheduler.step()
+            if not skip_scheduler:
+                lr_scheduler.step()
                 
-                '''metrics'''            
-                metric_logger.update(loss=loss.item())                                
-                metric_logger.update(lr=opt.param_groups[0]["lr"])
-                
-                ######################
-                # Update tensorboard #
-                ######################             
-                writer.add_scalar("train/loss", loss.item(), steps)
-                writer.add_scalar("lr", opt.param_groups[0]["lr"], steps)
-                
-                steps += 1                        
-                if steps % args.save_interval == 0:                
-                    loss_test = 0                    
-                    net.eval()                
-                    with torch.no_grad():                                        
-                        for i, (x, _, xa) in enumerate(test_loader):                        
-                            x = x.to(device)
-                            xa = xa.to(device)
-                            z1, z2, p1, p2 = net(x, xa)
-                            loss_test += net.compute_loss(z1, z2, p1, p2).item()
-                                    
-                    loss_test /= len(test_loader)                    
+            '''metrics'''            
+            metric_logger.update(loss=loss.item())                                
+            metric_logger.update(lr=opt.param_groups[0]["lr"])
+            
+            ######################
+            # Update tensorboard #
+            ######################             
+            writer.add_scalar("train/loss", loss.item(), steps)
+            writer.add_scalar("lr", opt.param_groups[0]["lr"], steps)
+            
+            steps += 1                        
+            if steps % args.save_interval == 0:                
+                loss_test = 0                    
+                net.eval()                
+                with torch.no_grad():                                        
+                    for i, (x, _, xa) in enumerate(test_loader):                        
+                        x = x.to(device)
+                        xa = xa.to(device)
+                        z1, z2, p1, p2 = net(x, xa)
+                        loss_test += BYOL.compute_loss(z1, z2, p1, p2).item() / x.shape[0]
+                                
+                loss_test /= len(test_loader)                    
 
-                    metric_logger.update(loss_test=loss_test)
-                    
-                    writer.add_scalar("test/loss", loss_test, steps)
-                    
-                    
-                    net.train()                
-                                    
-                    chkpnt = {
-                        'model_dict': net.state_dict(),
-                        'opt_dict': opt.state_dict(),
-                        'step': steps
-                    }
-                    
-                    torch.save(chkpnt, root / "chkpnt.pt")
+                metric_logger.update(loss_test=loss_test)
+                
+                writer.add_scalar("test/loss", loss_test, steps)
+                                                                    
+                chkpnt = {
+                    'model_dict': net.state_dict(),
+                    'opt_dict': opt.state_dict(),
+                    'step': steps
+                }
+                
+                torch.save(chkpnt, root / "chkpnt.pt")
+
+                net.train()
+                ###End main loop###
 
 if __name__ == "__main__":
     train()

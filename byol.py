@@ -44,7 +44,7 @@ class BYOL(nn.Module):
                 if self.remove_jit:
                     target_param.data = self.tau * target_param.data + (1 - self.tau) * online_param.data
                 else:
-                    update_ema_jit(target_param.data, online_param.data, self.tau, 1-self.tau)
+                    update_ema_jit(target_param.data, online_param.data, self.ema_dacay, 1-self.ema_dacay)
     
     def forward(self, x1, x2):
         # Compute online network outputs
@@ -64,6 +64,5 @@ class BYOL(nn.Module):
     
     @staticmethod
     def compute_loss(z1, z2, p1, p2):
-        # Compute BYOL loss
-        loss = F.mse_loss(p1, z2.detach()) + F.mse_loss(p2, z1.detach())
+        loss = 0.5*(F.mse_loss(p1, z2.detach(), reduction="sum") + F.mse_loss(p2, z1.detach(), reduction="sum"))
         return loss

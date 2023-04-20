@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import numpy as np
+from modules.res_block import ResBlock1d
 
 class ContentEncoder(nn.Module):
     def __init__(self, dim_input, dim_latent, win_len, hop_len, n_fft):
@@ -12,9 +13,12 @@ class ContentEncoder(nn.Module):
     
         c = (n_fft//2+1)*2
         nf = 256
-        block = [nn.Conv1d(c, nf, kernel_size=5, stride=1, padding=2, groups=2, bias=False),
-                 nn.BatchNorm1d(nf), 
-                 nn.LeakyReLU(0.1, True)]
+        block = [
+                 nn.Conv1d(c, nf, 3, 1, 1),
+                 ResBlock1d(nf, dilation=1, kernel_size=3),
+                 ResBlock1d(nf, dilation=3, kernel_size=5),
+                 ResBlock1d(nf, dilation=5, kernel_size=7),
+                 ]
 
         self.block = nn.Sequential(*block)
 
